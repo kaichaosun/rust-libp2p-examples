@@ -20,6 +20,7 @@ use libp2p::{
         PollParameters,
         ProtocolsHandlerUpgrErr,
         KeepAlive,
+        ProtocolsHandlerEvent,
     },
     InboundUpgrade,
     OutboundUpgrade,
@@ -129,6 +130,20 @@ pub struct PingHandler {
     inbound: Option<PongFuture>,
 }
 
+impl PingHandler {
+    /// Builds a new `PingHandler` with the given configuration.
+    pub fn new(config: PingConfig) -> Self {
+        PingHandler {
+            config,
+            timer: Delay::new(Duration::new(0, 0)),
+            pending_errors: VecDeque::with_capacity(2),
+            failures: 0,
+            outbound: None,
+            inbound: None,
+        }
+    }
+}
+
 enum PingState {
     OpenStream,
     Idle(NegotiatedSubstream),
@@ -176,9 +191,105 @@ impl ProtocolsHandler for PingHandler {
         if self.config.keep_alive {
             KeepAlive::Yes
         } else {
-            KeepALive::No
+            KeepAlive::No
         }
     }
+
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ProtocolsHandlerEvent<PingProtocol, (), PingResult, Self::Error>> {
+        // respond to inbound pings.
+        if let Some(fut) = self.inbound.as_mut() {
+            match fut.poll_unpin(cx) {
+                Poll::Pending => {}
+                Poll::Ready(Err(e)) => {
+                    log::debug!("Inbound ping error: {:?}", e);
+                    self.inbound = None;
+                }
+                Poll::Ready(Ok(stream)) => {
+                    self.inbound = Some(recv_ping(stream).boxed());
+                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Ok(PingSuccess::Pong)))
+                }
+            }
+        }
+
+        loop {
+            // check for outbound ping failures.
+            if let Some(error) = self.pending_errors.pop_back() {
+                log::debug!("Ping failure: {:?}", error);
+
+                self.failures += 1;
+
+                if self.failures > 1 || self.config.max_failures.get() > 1 {
+                    if self.failures >= self.config.max_failures.get() {
+                        log::debug!("Too many failures ({}). Closing connection.", self.failures);
+                        return Poll::Ready(ProtocolsHandlerEvent::Close(error))
+                    }
+
+                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Err(error)))
+                }
+            }
+
+            // continue outbound pings
+            match self.outbound.take() {
+                Some(PingState::Ping(mut ping)) => match ping.poll_unpin(cx) {
+                    Poll::Pending => {
+                        if self.timer.poll_unpin(cx).is_ready() {
+                            self.pending_errors.push_front(PingFailure::Timeout);
+                        } else {
+                            self.outbound = Some(PingState::Ping(ping));
+                            break
+                        }
+                    },
+                    Poll::Ready(Ok((stream, rtt))) => {
+                        self.failures = 0;
+                        self.timer.reset(self.config.interval);
+                        self.outbound = Some(PingState::Idle(stream));
+                        return Poll::Ready(
+                            ProtocolsHandlerEvent::Custom(
+                                Ok(PingSuccess::Ping { rtt })
+                            )
+                        )
+                    },
+                    Poll::Ready(Err(e)) => {
+                        self.pending_errors.push_front(PingFailure::Other {
+                            error: Box::new(e)
+                        })
+                    }
+                },
+                Some(PingState::Idle(stream)) => match self.timer.poll_unpin(cx) {
+                    Poll::Pending => {
+                        self.outbound = Some(PingState::Idle(stream));
+                        break
+                    },
+                    Poll::Ready(Ok(())) => {
+                        self.timer.reset(self.config.timeout);
+                        self.outbound = Some(PingState::Ping(send_ping(stream).boxed()));
+                    },
+                    Poll::Ready(Err(e)) => {
+                        return Poll::Ready(
+                            ProtocolsHandlerEvent::Close(
+                                PingFailure::Other { error: Box::new(e) } 
+                            )
+                        )
+                    }
+                },
+                Some(PingState::OpenStream) => {
+                    self.outbound = Some(PingState::OpenStream);
+                    break
+                },
+                None => {
+                    self.outbound = Some(PingState::OpenStream);
+                    let protocol = SubstreamProtocol::new(PingProtocol, ())
+                        .with_timeout(self.config.timeout);
+                    return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
+                        protocol
+                    })
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+
 }
 
 const PING_SIZE: usize = 32;
@@ -207,6 +318,7 @@ where
     let started = Instant::now();
     let mut recv_payload = [0u8; PING_SIZE];
     log::debug!("Awaiting pong for {:?}", payload);
+    
     stream.read_exact(&mut recv_payload).await?;
     if recv_payload == payload {
         Ok((stream, started.elapsed()))

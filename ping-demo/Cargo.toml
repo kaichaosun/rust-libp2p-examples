@@ -7,3 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+libp2p = "0.34.0"
+wasm-timer = "0.2.4"
+futures = "0.3.1"
+void = "1"
+log = "0.4"
+rand = "0.7"

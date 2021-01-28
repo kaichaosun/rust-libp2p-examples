@@ -1,4 +1,5 @@
 [workspace]
 members = [
-	"ping-demo"
+	"ping-demo",
+	"echo",
 ]

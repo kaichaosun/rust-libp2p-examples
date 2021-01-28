@@ -47,11 +47,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // create a transport.
     let transport = libp2p::build_development_transport(id_keys)?;
 
-    // create a Echo network behaviour.
-    let behaviour = Echo::new(EchoConfig::new().with_keep_alive(true));
+    // create a echo network behaviour.
+    let behaviour = EchoBehaviour::new(EchoConfig::new());
 
     // create a swarm that establishes connections through the given transport
-    // and applies the Echo behaviour on each connection.
+    // and applies the echo behaviour on each connection.
     let mut swarm = Swarm::new(transport, behaviour, peer_id);
 
     // Dial the peer identified by the multi-address given as the second
@@ -88,16 +88,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 
-// Echo protocl implementation
+// echo libp2p protocl implementation
 
-pub struct Echo {
+pub struct EchoBehaviour {
     config: EchoConfig,
     events: VecDeque<EchoEvent>,
 }
 
-impl Echo {
+impl EchoBehaviour {
     pub fn new(config: EchoConfig) -> Self {
-        Echo {
+        EchoBehaviour {
             config,
             events: VecDeque::new(),
         }
@@ -115,7 +115,7 @@ pub type EchoResult = Result<EchoSuccess, EchoFailure>;
 #[derive(Debug)]
 pub enum EchoSuccess {
     Pong,
-    Echo { rtt: Duration }
+    EchoDuration { rtt: Duration }
 }
 
 #[derive(Debug)]
@@ -127,8 +127,8 @@ pub enum EchoFailure {
 impl fmt::Display for EchoFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EchoFailure::Timeout => f.write_str("Echo timeout"),
-            EchoFailure::Other { error } => write!(f, "Echo error: {}", error)
+            EchoFailure::Timeout => f.write_str("echo timeout"),
+            EchoFailure::Other { error } => write!(f, "echo error: {}", error)
         }
     }
 }
@@ -147,7 +147,6 @@ pub struct EchoConfig {
     timeout: Duration,
     interval: Duration,
     max_failures: NonZeroU32,
-    keep_alive: bool,
 }
 
 impl EchoConfig {
@@ -156,17 +155,12 @@ impl EchoConfig {
             timeout: Duration::from_secs(20),
             interval: Duration::from_secs(15),
             max_failures: NonZeroU32::new(1).expect("1 != 0"),
-            keep_alive: false,
         }
     }
 
-    pub fn with_keep_alive(mut self, b: bool) -> Self {
-        self.keep_alive = b;
-        self
-    }
 }
 
-impl NetworkBehaviour for Echo {
+impl NetworkBehaviour for EchoBehaviour {
     type ProtocolsHandler = EchoHandler;
     type OutEvent = EchoEvent;
 
@@ -223,7 +217,7 @@ impl EchoHandler {
 enum EchoState {
     OpenStream,
     Idle(NegotiatedSubstream),
-    Echo(EchoFuture),
+    InEcho(EchoFuture),
 }
 
 type EchoFuture = BoxFuture<'static, Result<(NegotiatedSubstream, Duration), io::Error>>;
@@ -248,7 +242,7 @@ impl ProtocolsHandler for EchoHandler {
 
     fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
         self.timer.reset(self.config.timeout);
-        self.outbound = Some(EchoState::Echo(send_echo(stream).boxed()));
+        self.outbound = Some(EchoState::InEcho(send_echo(stream).boxed()));
     }
 
     fn inject_event(&mut self, _: Void) {}
@@ -264,11 +258,7 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
-        if self.config.keep_alive {
-            KeepAlive::Yes
-        } else {
-            KeepAlive::No
-        }
+        KeepAlive::Yes
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ProtocolsHandlerEvent<EchoProtocol, (), EchoResult, Self::Error>> {
@@ -277,7 +267,7 @@ impl ProtocolsHandler for EchoHandler {
             match fut.poll_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(Err(e)) => {
-                    log::debug!("Inbound Echo error: {:?}", e);
+                    log::debug!("Inbound echo error: {:?}", e);
                     self.inbound = None;
                 }
                 Poll::Ready(Ok(stream)) => {
@@ -288,9 +278,9 @@ impl ProtocolsHandler for EchoHandler {
         }
 
         loop {
-            // check for outbound Echo failures.
+            // check for outbound echo failures.
             if let Some(error) = self.pending_errors.pop_back() {
-                log::debug!("Echo failure: {:?}", error);
+                log::debug!("echo failure: {:?}", error);
 
                 self.failures += 1;
 
@@ -306,12 +296,12 @@ impl ProtocolsHandler for EchoHandler {
 
             // continue outbound Echos
             match self.outbound.take() {
-                Some(EchoState::Echo(mut echo)) => match echo.poll_unpin(cx) {
+                Some(EchoState::InEcho(mut echo)) => match echo.poll_unpin(cx) {
                     Poll::Pending => {
                         if self.timer.poll_unpin(cx).is_ready() {
                             self.pending_errors.push_front(EchoFailure::Timeout);
                         } else {
-                            self.outbound = Some(EchoState::Echo(echo));
+                            self.outbound = Some(EchoState::InEcho(echo));
                             break
                         }
                     },
@@ -321,7 +311,7 @@ impl ProtocolsHandler for EchoHandler {
                         self.outbound = Some(EchoState::Idle(stream));
                         return Poll::Ready(
                             ProtocolsHandlerEvent::Custom(
-                                Ok(EchoSuccess::Echo { rtt })
+                                Ok(EchoSuccess::EchoDuration { rtt })
                             )
                         )
                     },
@@ -338,7 +328,7 @@ impl ProtocolsHandler for EchoHandler {
                     },
                     Poll::Ready(Ok(())) => {
                         self.timer.reset(self.config.timeout);
-                        self.outbound = Some(EchoState::Echo(send_echo(stream).boxed()));
+                        self.outbound = Some(EchoState::InEcho(send_echo(stream).boxed()));
                     },
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(
@@ -375,7 +365,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin
 {
     let mut payload = [0u8; ECHO_SIZE];
-    log::debug!("Waiting for Echo ...");
+    log::debug!("Waiting for echo ...");
     stream.read_exact(&mut payload).await?;
     log::debug!("Sending pong for {:?}", payload);
     stream.write_all(&payload).await?;
@@ -388,7 +378,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin
 {
     let payload: [u8; ECHO_SIZE] = thread_rng().sample(distributions::Standard);
-    log::debug!("Preparing Echo payload {:?}", payload);
+    log::debug!("Preparing echo payload {:?}", payload);
     stream.write_all(&payload).await?;
     stream.flush().await?;
     let started = Instant::now();
@@ -399,7 +389,7 @@ where
     if recv_payload == payload {
         Ok((stream, started.elapsed()))
     } else {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "Echo payload mismatch"))
+        Err(io::Error::new(io::ErrorKind::InvalidData, "echo payload mismatch"))
     }
 }
 
@@ -431,6 +421,6 @@ impl UpgradeInfo for EchoProtocol {
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(b"/ipfs/Echo/1.0.0")
+        iter::once(b"/ipfs/echo/1.0.0")
     }
 }

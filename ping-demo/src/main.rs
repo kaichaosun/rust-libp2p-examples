@@ -25,15 +25,66 @@ use libp2p::{
     InboundUpgrade,
     OutboundUpgrade,
     core::{UpgradeInfo, connection::ConnectionId},
+    identity,
+    Swarm,
 };
 use wasm_timer::{Delay, Instant};
 use futures::future::BoxFuture;
 use void::Void;
 use futures::prelude::*;
 use rand::{distributions, prelude::*};
+use async_std::task;
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     println!("Hello, world!");
+    env_logger::init();
+
+    // create a random peerid.
+    let id_keys = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(id_keys.public());
+    println!("Local peer id: {:?}", peer_id);
+
+    // create a transport.
+    let transport = libp2p::build_development_transport(id_keys)?;
+
+    // create a ping network behaviour.
+    let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+
+    // create a swarm that establishes connections through the given transport
+    // and applies the ping behaviour on each connection.
+    let mut swarm = Swarm::new(transport, behaviour, peer_id);
+
+    // Dial the peer identified by the multi-address given as the second
+    // cli arg.
+    if let Some(addr) = std::env::args().nth(1) {
+        let remote = addr.parse()?;
+        Swarm::dial_addr(&mut swarm, remote)?;
+        println!("Dialed {}", addr)
+    }
+
+    // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
+    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    let mut listening = false;
+    task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
+        loop {
+            match swarm.poll_next_unpin(cx) {
+                Poll::Ready(Some(event)) => println!("{:?}", event),
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Pending => {
+                    if !listening {
+                        for addr in Swarm::listeners(&swarm) {
+                            println!("Listening on {}", addr);
+                            listening = true;
+                        }
+                    }
+                    return Poll::Pending
+                }
+            }
+        }
+    }));
+
+    Ok(())
 }
 
 
@@ -42,6 +93,15 @@ fn main() {
 pub struct Ping {
     config: PingConfig,
     events: VecDeque<PingEvent>,
+}
+
+impl Ping {
+    pub fn new(config: PingConfig) -> Self {
+        Ping {
+            config,
+            events: VecDeque::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,6 +148,22 @@ pub struct PingConfig {
     interval: Duration,
     max_failures: NonZeroU32,
     keep_alive: bool,
+}
+
+impl PingConfig {
+    pub fn new() -> Self {
+        Self {
+            timeout: Duration::from_secs(20),
+            interval: Duration::from_secs(15),
+            max_failures: NonZeroU32::new(1).expect("1 != 0"),
+            keep_alive: false,
+        }
+    }
+
+    pub fn with_keep_alive(mut self, b: bool) -> Self {
+        self.keep_alive = b;
+        self
+    }
 }
 
 impl NetworkBehaviour for Ping {

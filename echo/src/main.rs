@@ -1,12 +1,10 @@
 use std::{
-    num::NonZeroU32,
-    time::Duration,
     collections::VecDeque,
     error::Error,
     task::{Context, Poll},
     io,
-    fmt,
     iter,
+    str,
 };
 use libp2p::{
     PeerId,
@@ -24,31 +22,29 @@ use libp2p::{
     },
     InboundUpgrade,
     OutboundUpgrade,
-    core::{UpgradeInfo, connection::ConnectionId},
+    core::{UpgradeInfo, connection::ConnectionId, upgrade::ReadOneError},
     identity,
     Swarm,
 };
-use wasm_timer::{Delay, Instant};
 use futures::future::BoxFuture;
 use void::Void;
 use futures::prelude::*;
-use rand::{distributions, prelude::*};
 use async_std::task;
+use smallvec::SmallVec;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Hello, world!");
     env_logger::init();
 
     // create a random peerid.
     let id_keys = identity::Keypair::generate_ed25519();
     let peer_id = PeerId::from(id_keys.public());
-    println!("Local peer id: {:?}", peer_id);
+    log::info!("Local peer id: {:?}", peer_id);
 
     // create a transport.
     let transport = libp2p::build_development_transport(id_keys)?;
 
     // create a echo network behaviour.
-    let behaviour = EchoBehaviour::new(EchoConfig::new());
+    let behaviour = EchoBehaviour::new();
 
     // create a swarm that establishes connections through the given transport
     // and applies the echo behaviour on each connection.
@@ -59,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(addr) = std::env::args().nth(1) {
         let remote = addr.parse()?;
         Swarm::dial_addr(&mut swarm, remote)?;
-        println!("Dialed {}", addr)
+        log::info!("Dialed {}", addr)
     }
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
@@ -69,12 +65,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
         loop {
             match swarm.poll_next_unpin(cx) {
-                Poll::Ready(Some(event)) => println!("{:?}", event),
+                Poll::Ready(Some(event)) => log::info!("Get event: {:?}", event),
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Pending => {
                     if !listening {
                         for addr in Swarm::listeners(&swarm) {
-                            println!("Listening on {}", addr);
+                            log::info!("Listening on {}", addr);
                             listening = true;
                         }
                     }
@@ -91,98 +87,52 @@ fn main() -> Result<(), Box<dyn Error>> {
 // echo libp2p protocl implementation
 
 pub struct EchoBehaviour {
-    config: EchoConfig,
-    events: VecDeque<EchoEvent>,
+    events: VecDeque<EchoBehaviourEvent>,
 }
 
 impl EchoBehaviour {
-    pub fn new(config: EchoConfig) -> Self {
+    pub fn new() -> Self {
         EchoBehaviour {
-            config,
             events: VecDeque::new(),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct EchoEvent {
+pub struct EchoBehaviourEvent {
     pub peer: PeerId,
-    pub result: EchoResult,
-}
-
-pub type EchoResult = Result<EchoSuccess, EchoFailure>;
-
-#[derive(Debug)]
-pub enum EchoSuccess {
-    Pong,
-    EchoDuration { rtt: Duration }
-}
-
-#[derive(Debug)]
-pub enum EchoFailure {
-    Timeout,
-    Other { error: Box<dyn std::error::Error + Send + 'static> }
-}
-
-impl fmt::Display for EchoFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EchoFailure::Timeout => f.write_str("echo timeout"),
-            EchoFailure::Other { error } => write!(f, "echo error: {}", error)
-        }
-    }
-}
-
-impl Error for EchoFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            EchoFailure::Timeout => None,
-            EchoFailure::Other { error } => Some(&**error)
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct EchoConfig {
-    timeout: Duration,
-    interval: Duration,
-    max_failures: NonZeroU32,
-}
-
-impl EchoConfig {
-    pub fn new() -> Self {
-        Self {
-            timeout: Duration::from_secs(20),
-            interval: Duration::from_secs(15),
-            max_failures: NonZeroU32::new(1).expect("1 != 0"),
-        }
-    }
-
+    pub result: EchoHandlerEvent,
 }
 
 impl NetworkBehaviour for EchoBehaviour {
     type ProtocolsHandler = EchoHandler;
-    type OutEvent = EchoEvent;
+    type OutEvent = EchoBehaviourEvent;
 
     fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        EchoHandler::new(self.config.clone())
+        EchoHandler::new()
     }
 
     fn addresses_of_peer(&mut self, _peer_id: &PeerId) -> Vec<Multiaddr> {
         Vec::new()
     }
 
-    fn inject_connected(&mut self, _: &PeerId) {}
+    fn inject_connected(&mut self, _: &PeerId) {
+        log::info!("inject_connected");
+    }
 
-    fn inject_disconnected(&mut self, _: &PeerId) {}
+    fn inject_disconnected(&mut self, _: &PeerId) {
+        log::info!("inject_disconnected");
+    }
 
-    fn inject_event(&mut self, peer: PeerId, _: ConnectionId, result: EchoResult) {
-        self.events.push_front(EchoEvent { peer, result })
+    fn inject_event(&mut self, peer: PeerId, _: ConnectionId, result: EchoHandlerEvent) {
+        log::info!("inject_event");
+        self.events.push_front(EchoBehaviourEvent { peer, result })
     }
 
     fn poll(&mut self, _: &mut Context<'_>, _: &mut impl PollParameters)
-        -> Poll<NetworkBehaviourAction<Void, EchoEvent>>
+        -> Poll<NetworkBehaviourAction<Void, EchoBehaviourEvent>>
     {
+        log::info!("behaviour poll, {:?}", self.events);
         if let Some(e) = self.events.pop_back() {
             Poll::Ready(NetworkBehaviourAction::GenerateEvent(e))
         } else {
@@ -192,41 +142,33 @@ impl NetworkBehaviour for EchoBehaviour {
 }
 
 pub struct EchoHandler {
-    config: EchoConfig,
-    timer: Delay,
-    pending_errors: VecDeque<EchoFailure>,
-    failures: u32,
-    outbound: Option<EchoState>,
-    inbound: Option<PongFuture>,
+    events: SmallVec<[EchoHandlerEvent; 4]>,
+    inbound: Option<EchoFuture>,
+    outbound: Option<SendEchoFuture>,
+}
+
+type EchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
+type SendEchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
+
+#[derive(Debug)]
+pub enum EchoHandlerEvent {
+    Success(u8),
 }
 
 impl EchoHandler {
-    /// Builds a new `EchoHandler` with the given configuration.
-    pub fn new(config: EchoConfig) -> Self {
+    pub fn new() -> Self {
         EchoHandler {
-            config,
-            timer: Delay::new(Duration::new(0, 0)),
-            pending_errors: VecDeque::with_capacity(2),
-            failures: 0,
-            outbound: None,
+            events: SmallVec::new(),
             inbound: None,
+            outbound: None,
         }
     }
 }
 
-enum EchoState {
-    OpenStream,
-    Idle(NegotiatedSubstream),
-    InEcho(EchoFuture),
-}
-
-type EchoFuture = BoxFuture<'static, Result<(NegotiatedSubstream, Duration), io::Error>>;
-type PongFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
-
 impl ProtocolsHandler for EchoHandler {
     type InEvent = Void;
-    type OutEvent = EchoResult;
-    type Error = EchoFailure;
+    type OutEvent = EchoHandlerEvent;
+    type Error = ReadOneError;
     type InboundProtocol = EchoProtocol;
     type OutboundProtocol = EchoProtocol;
     type OutboundOpenInfo = ();
@@ -237,119 +179,77 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, (): ()) {
+        log::info!("inject_fully_negotiated_inbound");
         self.inbound = Some(recv_echo(stream).boxed());
     }
 
     fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
-        self.timer.reset(self.config.timeout);
-        self.outbound = Some(EchoState::InEcho(send_echo(stream).boxed()));
+        log::info!("inject_fully_negotiated_outbound");
+        self.outbound = Some(send_echo(stream).boxed());
     }
 
-    fn inject_event(&mut self, _: Void) {}
+    fn inject_event(&mut self, _: Void) {
+    }
 
     fn inject_dial_upgrade_error(&mut self, _info: (), error: ProtocolsHandlerUpgrErr<Void>) {
-        self.outbound = None; // Request a new substream on the next `poll`.
-        self.pending_errors.push_front(
-            match error {
-                ProtocolsHandlerUpgrErr::Timeout => EchoFailure::Timeout,
-                e => EchoFailure::Other { error: Box::new(e) },
-            }
-        )
+        log::info!("error happens in inject_dial_upgrade_error: {:?}", error);
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
-        KeepAlive::Yes
+        KeepAlive::No
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ProtocolsHandlerEvent<EchoProtocol, (), EchoResult, Self::Error>> {
-        // respond to inbound Echos.
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<
+        ProtocolsHandlerEvent<
+            EchoProtocol,
+            (),
+            EchoHandlerEvent,
+            Self::Error
+        >
+    > {
+        log::info!("==== poll in handler ===");
+
         if let Some(fut) = self.inbound.as_mut() {
             match fut.poll_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(Err(e)) => {
-                    log::debug!("Inbound echo error: {:?}", e);
+                    log::info!("Inbound ping error: {:?}", e);
                     self.inbound = None;
                 }
                 Poll::Ready(Ok(stream)) => {
                     self.inbound = Some(recv_echo(stream).boxed());
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Ok(EchoSuccess::Pong)))
+                    return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
                 }
             }
         }
 
         loop {
-            // check for outbound echo failures.
-            if let Some(error) = self.pending_errors.pop_back() {
-                log::debug!("echo failure: {:?}", error);
-
-                self.failures += 1;
-
-                if self.failures > 1 || self.config.max_failures.get() > 1 {
-                    if self.failures >= self.config.max_failures.get() {
-                        log::debug!("Too many failures ({}). Closing connection.", self.failures);
-                        return Poll::Ready(ProtocolsHandlerEvent::Close(error))
-                    }
-
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Err(error)))
-                }
-            }
-
-            // continue outbound Echos
             match self.outbound.take() {
-                Some(EchoState::InEcho(mut echo)) => match echo.poll_unpin(cx) {
-                    Poll::Pending => {
-                        if self.timer.poll_unpin(cx).is_ready() {
-                            self.pending_errors.push_front(EchoFailure::Timeout);
-                        } else {
-                            self.outbound = Some(EchoState::InEcho(echo));
+                Some(mut ping) => {
+                    match ping.poll_unpin(cx) {
+                        Poll::Pending => {
                             break
+                        },
+                        Poll::Ready(Ok(stream)) => {
+                            self.inbound = Some(recv_echo(stream).boxed());
+                            return Poll::Ready(
+                                ProtocolsHandlerEvent::Custom(
+                                    EchoHandlerEvent::Success(1)
+                                )
+                            )
+                        },
+                        Poll::Ready(Err(e)) => {
+                            log::info!("Error happends: {:?}", e);
                         }
-                    },
-                    Poll::Ready(Ok((stream, rtt))) => {
-                        self.failures = 0;
-                        self.timer.reset(self.config.interval);
-                        self.outbound = Some(EchoState::Idle(stream));
-                        return Poll::Ready(
-                            ProtocolsHandlerEvent::Custom(
-                                Ok(EchoSuccess::EchoDuration { rtt })
-                            )
-                        )
-                    },
-                    Poll::Ready(Err(e)) => {
-                        self.pending_errors.push_front(EchoFailure::Other {
-                            error: Box::new(e)
-                        })
                     }
-                },
-                Some(EchoState::Idle(stream)) => match self.timer.poll_unpin(cx) {
-                    Poll::Pending => {
-                        self.outbound = Some(EchoState::Idle(stream));
-                        break
-                    },
-                    Poll::Ready(Ok(())) => {
-                        self.timer.reset(self.config.timeout);
-                        self.outbound = Some(EchoState::InEcho(send_echo(stream).boxed()));
-                    },
-                    Poll::Ready(Err(e)) => {
-                        return Poll::Ready(
-                            ProtocolsHandlerEvent::Close(
-                                EchoFailure::Other { error: Box::new(e) } 
-                            )
-                        )
-                    }
-                },
-                Some(EchoState::OpenStream) => {
-                    self.outbound = Some(EchoState::OpenStream);
-                    break
+                    self.outbound = None;
                 },
                 None => {
-                    self.outbound = Some(EchoState::OpenStream);
-                    let protocol = SubstreamProtocol::new(EchoProtocol, ())
-                        .with_timeout(self.config.timeout);
+                    let protocol = SubstreamProtocol::new(EchoProtocol, ());
                     return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
                         protocol
                     })
-                }
+                },
             }
         }
 
@@ -358,40 +258,41 @@ impl ProtocolsHandler for EchoHandler {
 
 }
 
-const ECHO_SIZE: usize = 32;
+const ECHO_SIZE: usize = 12;
+
+pub async fn send_echo<S>(mut stream: S) -> io::Result<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin
+{
+    let payload = "hello world!";
+    log::info!("Preparing send payload {:?}", payload);
+    stream.write_all(payload.as_bytes()).await?;
+    stream.flush().await?;
+    let mut recv_payload = [0u8; ECHO_SIZE];
+    log::info!("Awaiting echo for {:?}", payload);
+    
+    stream.read_exact(&mut recv_payload).await?;
+    log::info!("Received echo: {:?}", str::from_utf8(&recv_payload));
+    if str::from_utf8(&recv_payload) == Ok(payload) {
+        Ok(stream)
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "Echo payload mismatch"))
+    }
+}
 
 pub async fn recv_echo<S>(mut stream: S) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin
 {
     let mut payload = [0u8; ECHO_SIZE];
-    log::debug!("Waiting for echo ...");
+    log::info!("Waiting for echo ...");
     stream.read_exact(&mut payload).await?;
-    log::debug!("Sending pong for {:?}", payload);
+    log::info!("Echo for {:?}", payload);
     stream.write_all(&payload).await?;
     stream.flush().await?;
     Ok(stream)
 }
 
-pub async fn send_echo<S>(mut stream: S) -> io::Result<(S, Duration)>
-where
-    S: AsyncRead + AsyncWrite + Unpin
-{
-    let payload: [u8; ECHO_SIZE] = thread_rng().sample(distributions::Standard);
-    log::debug!("Preparing echo payload {:?}", payload);
-    stream.write_all(&payload).await?;
-    stream.flush().await?;
-    let started = Instant::now();
-    let mut recv_payload = [0u8; ECHO_SIZE];
-    log::debug!("Awaiting pong for {:?}", payload);
-    
-    stream.read_exact(&mut recv_payload).await?;
-    if recv_payload == payload {
-        Ok((stream, started.elapsed()))
-    } else {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "echo payload mismatch"))
-    }
-}
 
 #[derive(Default, Debug, Copy, Clone)]
 pub struct EchoProtocol;
@@ -402,6 +303,7 @@ impl InboundUpgrade<NegotiatedSubstream> for EchoProtocol {
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_inbound(self, stream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
+        log::info!("upgrade_inbound");
         future::ok(stream)
     }
 }
@@ -412,6 +314,7 @@ impl OutboundUpgrade<NegotiatedSubstream> for EchoProtocol {
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_outbound(self, stream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
+        log::info!("upgrade_outbound");
         future::ok(stream)
     }
 }

@@ -5,6 +5,8 @@ use std::{
     io,
     iter,
     str,
+    thread,
+    time,
 };
 use libp2p::{
     PeerId,
@@ -223,7 +225,7 @@ impl ProtocolsHandler for EchoHandler {
                 }
                 Poll::Ready(Ok(stream)) => {
                     log::info!("poll ready in hander");
-                    self.inbound = Some(recv_echo(stream).boxed());
+                    // self.inbound = Some(recv_echo(stream).boxed());
                     return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
                 }
             }
@@ -237,33 +239,36 @@ impl ProtocolsHandler for EchoHandler {
             })
         }
 
-        loop {
-            log::info!("im in looping state");
-            match self.outbound.take() {
-                Some(mut send_echo_future) => {
-                    match send_echo_future.poll_unpin(cx) {
-                        Poll::Pending => {
-                            log::info!("out bound stream poll pending");
-                        },
-                        Poll::Ready(Ok(stream)) => {
-                            log::info!("out bound stream poll ready !!!");
-                            // self.inbound = Some(send_echo(stream).boxed());
-                            return Poll::Ready(
-                                ProtocolsHandlerEvent::Custom(
-                                    EchoHandlerEvent::Success(1)
-                                )
+        // loop {
+        //     log::info!("im in looping state");
+            
+        // }
+
+        match self.outbound.take() {
+            Some(mut send_echo_future) => {
+                match send_echo_future.poll_unpin(cx) {
+                    Poll::Pending => {
+                        log::info!("out bound stream poll pending");
+                    },
+                    Poll::Ready(Ok(stream)) => {
+                        log::info!("out bound stream poll ready !!!");
+                        self.inbound = Some(recv_echo(stream).boxed());
+                        return Poll::Ready(
+                            ProtocolsHandlerEvent::Custom(
+                                EchoHandlerEvent::Success(1)
                             )
-                        },
-                        Poll::Ready(Err(e)) => {
-                            log::info!("Error happends: {:?}", e);
-                        }
+                        )
+                    },
+                    Poll::Ready(Err(e)) => {
+                        log::info!("Error happends: {:?}", e);
                     }
-                    self.outbound = None;
-                },
-                None => {
-                    break;
-                },
-            }
+                }
+                self.outbound = None;
+            },
+            None => {
+                // break;
+                thread::sleep(time::Duration::from_secs(3));
+            },
         }
         
         Poll::Pending
@@ -304,6 +309,7 @@ where
     log::info!("Echo for {:?}", payload);
     stream.write_all(&payload).await?;
     stream.flush().await?;
+    log::info!("recv echo flush success, {:?}", payload);
     Ok(stream)
 }
 

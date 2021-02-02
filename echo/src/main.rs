@@ -66,7 +66,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => log::info!("Get event: {:?}", event),
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => {
+                    log::info!("Swam poll next ready none");
+                    return Poll::Ready(())
+                },
                 Poll::Pending => {
                     if !listening {
                         for addr in Swarm::listeners(&swarm) {
@@ -142,9 +145,9 @@ impl NetworkBehaviour for EchoBehaviour {
 }
 
 pub struct EchoHandler {
-    events: SmallVec<[EchoHandlerEvent; 4]>,
     inbound: Option<EchoFuture>,
     outbound: Option<SendEchoFuture>,
+    already_echo: bool,
 }
 
 type EchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
@@ -158,9 +161,9 @@ pub enum EchoHandlerEvent {
 impl EchoHandler {
     pub fn new() -> Self {
         EchoHandler {
-            events: SmallVec::new(),
             inbound: None,
             outbound: None,
+            already_echo: false,
         }
     }
 }
@@ -196,7 +199,7 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
-        KeepAlive::No
+        KeepAlive::Yes
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<
@@ -211,27 +214,40 @@ impl ProtocolsHandler for EchoHandler {
 
         if let Some(fut) = self.inbound.as_mut() {
             match fut.poll_unpin(cx) {
-                Poll::Pending => {}
+                Poll::Pending => {
+                    log::info!("------ still pending ------- ");
+                }
                 Poll::Ready(Err(e)) => {
-                    log::info!("Inbound ping error: {:?}", e);
+                    log::info!("Inbound receive echo error: {:?}", e);
                     self.inbound = None;
                 }
                 Poll::Ready(Ok(stream)) => {
+                    log::info!("poll ready in hander");
                     self.inbound = Some(recv_echo(stream).boxed());
                     return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
                 }
             }
         }
 
+        if !self.already_echo {
+            self.already_echo = true;
+            let protocol = SubstreamProtocol::new(EchoProtocol, ());
+            return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
+                protocol
+            })
+        }
+
         loop {
+            log::info!("im in looping state");
             match self.outbound.take() {
-                Some(mut ping) => {
-                    match ping.poll_unpin(cx) {
+                Some(mut send_echo_future) => {
+                    match send_echo_future.poll_unpin(cx) {
                         Poll::Pending => {
-                            break
+                            log::info!("out bound stream poll pending");
                         },
                         Poll::Ready(Ok(stream)) => {
-                            self.inbound = Some(recv_echo(stream).boxed());
+                            log::info!("out bound stream poll ready !!!");
+                            // self.inbound = Some(send_echo(stream).boxed());
                             return Poll::Ready(
                                 ProtocolsHandlerEvent::Custom(
                                     EchoHandlerEvent::Success(1)
@@ -245,14 +261,11 @@ impl ProtocolsHandler for EchoHandler {
                     self.outbound = None;
                 },
                 None => {
-                    let protocol = SubstreamProtocol::new(EchoProtocol, ());
-                    return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
-                        protocol
-                    })
+                    break;
                 },
             }
         }
-
+        
         Poll::Pending
     }
 
@@ -266,6 +279,7 @@ where
 {
     let payload = "hello world!";
     log::info!("Preparing send payload {:?}", payload);
+    log::info!("payload size {:?}", payload.as_bytes());
     stream.write_all(payload.as_bytes()).await?;
     stream.flush().await?;
     let mut recv_payload = [0u8; ECHO_SIZE];

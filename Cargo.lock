@@ -593,6 +593,7 @@ dependencies = [
  "async-std",
  "env_logger",
  "futures",
+ "futures-timer",
  "libp2p",
  "log",
  "smallvec",

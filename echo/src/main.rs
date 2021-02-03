@@ -5,8 +5,6 @@ use std::{
     io,
     iter,
     str,
-    thread,
-    time,
 };
 use libp2p::{
     PeerId,
@@ -32,7 +30,6 @@ use futures::future::BoxFuture;
 use void::Void;
 use futures::prelude::*;
 use async_std::task;
-use smallvec::SmallVec;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
@@ -184,11 +181,17 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn inject_fully_negotiated_inbound(&mut self, stream: NegotiatedSubstream, (): ()) {
+        if self.inbound.is_some() {
+            panic!("already have inbound");
+        }
         log::info!("inject_fully_negotiated_inbound");
         self.inbound = Some(recv_echo(stream).boxed());
     }
 
     fn inject_fully_negotiated_outbound(&mut self, stream: NegotiatedSubstream, (): ()) {
+        if self.outbound.is_some() {
+            panic!("already have outbound");
+        }
         log::info!("inject_fully_negotiated_outbound");
         self.outbound = Some(send_echo(stream).boxed());
     }
@@ -222,10 +225,11 @@ impl ProtocolsHandler for EchoHandler {
                 Poll::Ready(Err(e)) => {
                     log::info!("Inbound receive echo error: {:?}", e);
                     self.inbound = None;
+                    panic!();
                 }
                 Poll::Ready(Ok(stream)) => {
                     log::info!("poll ready in hander");
-                    // self.inbound = Some(recv_echo(stream).boxed());
+                    self.inbound = Some(recv_echo(stream).boxed());
                     return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
                 }
             }
@@ -239,20 +243,18 @@ impl ProtocolsHandler for EchoHandler {
             })
         }
 
-        // loop {
-        //     log::info!("im in looping state");
-            
-        // }
-
         match self.outbound.take() {
             Some(mut send_echo_future) => {
                 match send_echo_future.poll_unpin(cx) {
                     Poll::Pending => {
+                        // mxinden: The future has not yet finished. Make sure
+                        // to poll it again on the next iteration.
+                        self.outbound = Some(send_echo_future);
                         log::info!("out bound stream poll pending");
                     },
                     Poll::Ready(Ok(stream)) => {
                         log::info!("out bound stream poll ready !!!");
-                        self.inbound = Some(recv_echo(stream).boxed());
+                        self.outbound = Some(send_echo(stream).boxed());
                         return Poll::Ready(
                             ProtocolsHandlerEvent::Custom(
                                 EchoHandlerEvent::Success(1)
@@ -261,13 +263,20 @@ impl ProtocolsHandler for EchoHandler {
                     },
                     Poll::Ready(Err(e)) => {
                         log::info!("Error happends: {:?}", e);
+                        panic!();
                     }
                 }
-                self.outbound = None;
             },
             None => {
-                // break;
-                thread::sleep(time::Duration::from_secs(3));
+                // mxinden: Don't use thread::sleep in a futures context. This
+                // will block the entire thread, allowing no other future,
+                // potentially running on that same thread, to make progress.
+                // Use `futures-timer` instead. Happy to go into more details.
+                // Let me know.
+                //
+                // thread::sleep(time::Duration::from_secs(3));
+
+                log::info!("Waiting for outbound substream to be negotiated");
             },
         }
         
@@ -282,6 +291,9 @@ pub async fn send_echo<S>(mut stream: S) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin
 {
+    // mxinden: A bit of a hack. Likely nicer to do somewhere else.
+    futures_timer::Delay::new(std::time::Duration::from_secs(3)).await;
+
     let payload = "hello world!";
     log::info!("Preparing send payload {:?}", payload);
     log::info!("payload size {:?}", payload.as_bytes());

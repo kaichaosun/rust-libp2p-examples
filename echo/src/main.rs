@@ -119,22 +119,22 @@ impl NetworkBehaviour for EchoBehaviour {
     }
 
     fn inject_connected(&mut self, _: &PeerId) {
-        log::info!("inject_connected");
+        log::info!("NetworkBehaviour::inject_connected");
     }
 
     fn inject_disconnected(&mut self, _: &PeerId) {
-        log::info!("inject_disconnected");
+        log::info!("NetworkBehaviour::inject_disconnected");
     }
 
     fn inject_event(&mut self, peer: PeerId, _: ConnectionId, result: EchoHandlerEvent) {
-        log::info!("inject_event");
+        log::info!("NetworkBehaviour::inject_event");
         self.events.push_front(EchoBehaviourEvent { peer, result })
     }
 
     fn poll(&mut self, _: &mut Context<'_>, _: &mut impl PollParameters)
         -> Poll<NetworkBehaviourAction<Void, EchoBehaviourEvent>>
     {
-        log::info!("behaviour poll, {:?}", self.events);
+        log::info!("NetworkBehaviour::poll, events: {:?}", self.events);
         if let Some(e) = self.events.pop_back() {
             Poll::Ready(NetworkBehaviourAction::GenerateEvent(e))
         } else {
@@ -184,7 +184,7 @@ impl ProtocolsHandler for EchoHandler {
         if self.inbound.is_some() {
             panic!("already have inbound");
         }
-        log::info!("inject_fully_negotiated_inbound");
+        log::info!("ProtocolsHandler::inject_fully_negotiated_inbound");
         self.inbound = Some(recv_echo(stream).boxed());
     }
 
@@ -192,7 +192,7 @@ impl ProtocolsHandler for EchoHandler {
         if self.outbound.is_some() {
             panic!("already have outbound");
         }
-        log::info!("inject_fully_negotiated_outbound");
+        log::info!("ProtocolsHandler::inject_fully_negotiated_outbound");
         self.outbound = Some(send_echo(stream).boxed());
     }
 
@@ -200,7 +200,7 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn inject_dial_upgrade_error(&mut self, _info: (), error: ProtocolsHandlerUpgrErr<Void>) {
-        log::info!("error happens in inject_dial_upgrade_error: {:?}", error);
+        log::info!("ProtocolsHandler::inject_dial_upgrade_error: {:?}", error);
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
@@ -215,20 +215,20 @@ impl ProtocolsHandler for EchoHandler {
             Self::Error
         >
     > {
-        log::info!("==== poll in handler ===");
+        log::info!("ProtocolsHandler::poll begins...");
 
         if let Some(fut) = self.inbound.as_mut() {
             match fut.poll_unpin(cx) {
                 Poll::Pending => {
-                    log::info!("------ still pending ------- ");
+                    log::info!("ProtocolsHandler::poll, inbound is some but pending...");
                 }
                 Poll::Ready(Err(e)) => {
-                    log::info!("Inbound receive echo error: {:?}", e);
+                    log::info!("ProtocolsHandler::poll, inbound is some but resolve with error: {:?}", e);
                     self.inbound = None;
                     panic!();
                 }
                 Poll::Ready(Ok(stream)) => {
-                    log::info!("poll ready in hander");
+                    log::info!("ProtocolsHandler::poll, inbound is some and ready with success");
                     self.inbound = Some(recv_echo(stream).boxed());
                     return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
                 }
@@ -250,10 +250,10 @@ impl ProtocolsHandler for EchoHandler {
                         // mxinden: The future has not yet finished. Make sure
                         // to poll it again on the next iteration.
                         self.outbound = Some(send_echo_future);
-                        log::info!("out bound stream poll pending");
+                        log::info!("ProtocolsHandler::poll, outbound is some but pending...");
                     },
                     Poll::Ready(Ok(stream)) => {
-                        log::info!("out bound stream poll ready !!!");
+                        log::info!("ProtocolsHandler::poll, outbound is some and ready with success");
                         self.outbound = Some(send_echo(stream).boxed());
                         return Poll::Ready(
                             ProtocolsHandlerEvent::Custom(
@@ -262,7 +262,7 @@ impl ProtocolsHandler for EchoHandler {
                         )
                     },
                     Poll::Ready(Err(e)) => {
-                        log::info!("Error happends: {:?}", e);
+                        log::info!("ProtocolsHandler::poll, outbound is some but resolve with error: {:?}", e);
                         panic!();
                     }
                 }
@@ -276,7 +276,7 @@ impl ProtocolsHandler for EchoHandler {
                 //
                 // thread::sleep(time::Duration::from_secs(3));
 
-                log::info!("Waiting for outbound substream to be negotiated");
+                log::info!("ProtocolsHandler::poll, outbound is none, waiting for outbound substream to be negotiated");
             },
         }
         
@@ -295,15 +295,15 @@ where
     futures_timer::Delay::new(std::time::Duration::from_secs(3)).await;
 
     let payload = "hello world!";
-    log::info!("Preparing send payload {:?}", payload);
-    log::info!("payload size {:?}", payload.as_bytes());
+    log::info!("send_echo, preparing send payload {:?}", payload);
+    log::info!("send_echo, payload content {:?}", payload.as_bytes());
     stream.write_all(payload.as_bytes()).await?;
     stream.flush().await?;
     let mut recv_payload = [0u8; ECHO_SIZE];
-    log::info!("Awaiting echo for {:?}", payload);
+    log::info!("send_echo, awaiting echo for {:?}", payload);
     
     stream.read_exact(&mut recv_payload).await?;
-    log::info!("Received echo: {:?}", str::from_utf8(&recv_payload));
+    log::info!("send_echo, received echo: {:?}", str::from_utf8(&recv_payload));
     if str::from_utf8(&recv_payload) == Ok(payload) {
         Ok(stream)
     } else {
@@ -316,12 +316,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin
 {
     let mut payload = [0u8; ECHO_SIZE];
-    log::info!("Waiting for echo ...");
+    log::info!("recv_echo, waiting for echo ...");
     stream.read_exact(&mut payload).await?;
-    log::info!("Echo for {:?}", payload);
+    log::info!("recv_echo, echo for {:?}", payload);
     stream.write_all(&payload).await?;
     stream.flush().await?;
-    log::info!("recv echo flush success, {:?}", payload);
+    log::info!("recv_echo, receive echo successfully, {:?}", payload);
     Ok(stream)
 }
 
@@ -335,7 +335,7 @@ impl InboundUpgrade<NegotiatedSubstream> for EchoProtocol {
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_inbound(self, stream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
-        log::info!("upgrade_inbound");
+        log::info!("InboundUpgrade::upgrade_inbound");
         future::ok(stream)
     }
 }
@@ -346,7 +346,7 @@ impl OutboundUpgrade<NegotiatedSubstream> for EchoProtocol {
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_outbound(self, stream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
-        log::info!("upgrade_outbound");
+        log::info!("OutboundUpgrade::upgrade_outbound");
         future::ok(stream)
     }
 }

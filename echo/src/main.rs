@@ -154,7 +154,7 @@ type SendEchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>
 
 #[derive(Debug)]
 pub enum EchoHandlerEvent {
-    Success(u8),
+    Success,
 }
 
 impl EchoHandler {
@@ -230,7 +230,7 @@ impl ProtocolsHandler for EchoHandler {
                 Poll::Ready(Ok(stream)) => {
                     log::info!("ProtocolsHandler::poll, inbound is some and ready with success");
                     self.inbound = Some(recv_echo(stream).boxed());
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success(1)))
+                    return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success))
                 }
             }
         }
@@ -254,10 +254,9 @@ impl ProtocolsHandler for EchoHandler {
                     },
                     Poll::Ready(Ok(stream)) => {
                         log::info!("ProtocolsHandler::poll, outbound is some and ready with success");
-                        self.outbound = Some(send_echo(stream).boxed());
                         return Poll::Ready(
                             ProtocolsHandlerEvent::Custom(
-                                EchoHandlerEvent::Success(1)
+                                EchoHandlerEvent::Success
                             )
                         )
                     },
@@ -316,7 +315,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin
 {
     let mut payload = [0u8; ECHO_SIZE];
-    log::info!("recv_echo, waiting for echo ...");
+    log::info!("recv_echo, waiting for echo...");
     stream.read_exact(&mut payload).await?;
     log::info!("recv_echo, echo for {:?}", payload);
     stream.write_all(&payload).await?;

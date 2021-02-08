@@ -160,13 +160,12 @@ impl NetworkBehaviour for EchoBehaviour {
 
 pub struct EchoHandler {
     inbound: Option<EchoFuture>,
-    outbound: Option<SendEchoFuture>,
+    outbound: Option<EchoFuture>,
     init_echo: bool,
     already_echo: bool,
 }
 
 type EchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
-type SendEchoFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
 
 #[derive(Debug)]
 pub enum EchoHandlerEvent {

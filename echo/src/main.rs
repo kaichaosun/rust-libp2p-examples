@@ -12,17 +12,15 @@ use libp2p::{
     swarm::{
         NetworkBehaviour,
         NegotiatedSubstream,
-        ProtocolsHandler,
+        handler::{ConnectionHandler, ConnectionHandlerUpgrErr, ConnectionHandlerEvent},
         SubstreamProtocol,
         NetworkBehaviourAction,
         PollParameters,
-        ProtocolsHandlerUpgrErr,
         KeepAlive,
-        ProtocolsHandlerEvent,
     },
     InboundUpgrade,
     OutboundUpgrade,
-    core::{UpgradeInfo, connection::ConnectionId, upgrade::ReadOneError},
+    core::{UpgradeInfo, connection::ConnectionId},
     identity,
     Swarm,
 };
@@ -31,7 +29,8 @@ use void::Void;
 use futures::prelude::*;
 use async_std::task;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[async_std::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     // create a random peerid.
@@ -40,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     log::info!("Local peer id: {:?}", peer_id);
 
     // create a transport.
-    let transport = libp2p::build_development_transport(id_keys)?;
+    let transport = libp2p::development_transport(id_keys).await?;
     
     let mut behaviour_config = EchoBehaviourConfig { init_echo: false };
     // get the multi-address of remote peer given as the second cli argument.
@@ -59,15 +58,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // if the remote peer exists, dial it.
     if let Some(addr) = target {
-        let remote = addr.parse()?;
+        let remote: Multiaddr = addr.parse()?;
 
-        Swarm::dial_addr(&mut swarm, remote)?;
+        swarm.dial(remote)?;
         log::info!("Dialed {}", addr)
     }
     
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
-    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     let mut listening = false;
     task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
@@ -122,23 +121,15 @@ pub struct EchoBehaviourEvent {
 }
 
 impl NetworkBehaviour for EchoBehaviour {
-    type ProtocolsHandler = EchoHandler;
+    type ConnectionHandler = EchoHandler;
     type OutEvent = EchoBehaviourEvent;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
         EchoHandler::new(self.config.init_echo)
     }
 
     fn addresses_of_peer(&mut self, _peer_id: &PeerId) -> Vec<Multiaddr> {
         Vec::new()
-    }
-
-    fn inject_connected(&mut self, _: &PeerId) {
-        log::debug!("NetworkBehaviour::inject_connected");
-    }
-
-    fn inject_disconnected(&mut self, _: &PeerId) {
-        log::debug!("NetworkBehaviour::inject_disconnected");
     }
 
     fn inject_event(&mut self, peer: PeerId, _: ConnectionId, result: EchoHandlerEvent) {
@@ -147,7 +138,7 @@ impl NetworkBehaviour for EchoBehaviour {
     }
 
     fn poll(&mut self, _: &mut Context<'_>, _: &mut impl PollParameters)
-        -> Poll<NetworkBehaviourAction<Void, EchoBehaviourEvent>>
+        -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>>
     {
         log::debug!("NetworkBehaviour::poll, events: {:?}", self.events);
         if let Some(e) = self.events.pop_back() {
@@ -183,10 +174,10 @@ impl EchoHandler {
     }
 }
 
-impl ProtocolsHandler for EchoHandler {
+impl ConnectionHandler for EchoHandler {
     type InEvent = Void;
     type OutEvent = EchoHandlerEvent;
-    type Error = ReadOneError;
+    type Error = io::Error;
     type InboundProtocol = EchoProtocol;
     type OutboundProtocol = EchoProtocol;
     type OutboundOpenInfo = ();
@@ -215,7 +206,7 @@ impl ProtocolsHandler for EchoHandler {
     fn inject_event(&mut self, _: Void) {
     }
 
-    fn inject_dial_upgrade_error(&mut self, _info: (), error: ProtocolsHandlerUpgrErr<Void>) {
+    fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
         log::debug!("ProtocolsHandler::inject_dial_upgrade_error: {:?}", error);
     }
 
@@ -224,7 +215,7 @@ impl ProtocolsHandler for EchoHandler {
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<
-        ProtocolsHandlerEvent<
+        ConnectionHandlerEvent<
             EchoProtocol,
             (),
             EchoHandlerEvent,
@@ -246,7 +237,7 @@ impl ProtocolsHandler for EchoHandler {
                 Poll::Ready(Ok(stream)) => {
                     log::debug!("ProtocolsHandler::poll, inbound is some and ready with success");
                     self.inbound = Some(recv_echo(stream).boxed());
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(EchoHandlerEvent::Success))
+                    return Poll::Ready(ConnectionHandlerEvent::Custom(EchoHandlerEvent::Success))
                 }
             }
         }
@@ -263,7 +254,7 @@ impl ProtocolsHandler for EchoHandler {
                     Poll::Ready(Ok(_stream)) => {
                         log::debug!("ProtocolsHandler::poll, outbound is some and ready with success");
                         return Poll::Ready(
-                            ProtocolsHandlerEvent::Custom(
+                            ConnectionHandlerEvent::Custom(
                                 EchoHandlerEvent::Success
                             )
                         )
@@ -286,7 +277,7 @@ impl ProtocolsHandler for EchoHandler {
                 if self.init_echo && !self.already_echo {
                     self.already_echo = true;
                     let protocol = SubstreamProtocol::new(EchoProtocol, ());
-                    return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
+                    return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                         protocol
                     })
                 }

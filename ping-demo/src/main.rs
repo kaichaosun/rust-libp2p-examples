@@ -14,13 +14,11 @@ use libp2p::{
     swarm::{
         NetworkBehaviour,
         NegotiatedSubstream,
-        ProtocolsHandler,
+        handler::{ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr},
         SubstreamProtocol,
         NetworkBehaviourAction,
         PollParameters,
-        ProtocolsHandlerUpgrErr,
         KeepAlive,
-        ProtocolsHandlerEvent,
     },
     InboundUpgrade,
     OutboundUpgrade,
@@ -35,35 +33,35 @@ use futures::prelude::*;
 use rand::{distributions, prelude::*};
 use async_std::task;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    println!("Hello, world!");
+#[async_std::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     // create a random peerid.
-    let id_keys = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(id_keys.public());
-    println!("Local peer id: {:?}", peer_id);
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+    println!("Local peer id: {:?}", local_peer_id);
 
     // create a transport.
-    let transport = libp2p::build_development_transport(id_keys)?;
+    let transport = libp2p::development_transport(local_key).await?;
 
     // create a ping network behaviour.
     let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
 
     // create a swarm that establishes connections through the given transport
     // and applies the ping behaviour on each connection.
-    let mut swarm = Swarm::new(transport, behaviour, peer_id);
+    let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
 
     // Dial the peer identified by the multi-address given as the second
     // cli arg.
     if let Some(addr) = std::env::args().nth(1) {
-        let remote = addr.parse()?;
-        Swarm::dial_addr(&mut swarm, remote)?;
+        let remote: Multiaddr = addr.parse()?;
+        swarm.dial(remote)?;
         println!("Dialed {}", addr)
     }
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
-    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     let mut listening = false;
     task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
@@ -167,10 +165,10 @@ impl PingConfig {
 }
 
 impl NetworkBehaviour for Ping {
-    type ProtocolsHandler = PingHandler;
+    type ConnectionHandler = PingHandler;
     type OutEvent = PingEvent;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
         PingHandler::new(self.config.clone())
     }
 
@@ -178,18 +176,22 @@ impl NetworkBehaviour for Ping {
         Vec::new()
     }
 
-    fn inject_connected(&mut self, _: &PeerId) {}
-
-    fn inject_disconnected(&mut self, _: &PeerId) {}
-
     fn inject_event(&mut self, peer: PeerId, _: ConnectionId, result: PingResult) {
         self.events.push_front(PingEvent { peer, result })
     }
 
     fn poll(&mut self, _: &mut Context<'_>, _: &mut impl PollParameters)
-        -> Poll<NetworkBehaviourAction<Void, PingEvent>>
+        -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>>
     {
         if let Some(e) = self.events.pop_back() {
+            let PingEvent { result, peer } = &e;
+
+            match result {
+                Ok(PingSuccess::Ping { .. }) => log::debug!("Ping sent to {:?}", peer),
+                Ok(PingSuccess::Pong) => log::debug!("Ping received from {:?}", peer),
+                _ => {}
+            }
+
             Poll::Ready(NetworkBehaviourAction::GenerateEvent(e))
         } else {
             Poll::Pending
@@ -229,7 +231,7 @@ enum PingState {
 type PingFuture = BoxFuture<'static, Result<(NegotiatedSubstream, Duration), io::Error>>;
 type PongFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
 
-impl ProtocolsHandler for PingHandler {
+impl ConnectionHandler for PingHandler {
     type InEvent = Void;
     type OutEvent = PingResult;
     type Error = PingFailure;
@@ -253,11 +255,11 @@ impl ProtocolsHandler for PingHandler {
 
     fn inject_event(&mut self, _: Void) {}
 
-    fn inject_dial_upgrade_error(&mut self, _info: (), error: ProtocolsHandlerUpgrErr<Void>) {
+    fn inject_dial_upgrade_error(&mut self, _info: (), error: ConnectionHandlerUpgrErr<Void>) {
         self.outbound = None; // Request a new substream on the next `poll`.
         self.pending_errors.push_front(
             match error {
-                ProtocolsHandlerUpgrErr::Timeout => PingFailure::Timeout,
+                ConnectionHandlerUpgrErr::Timeout => PingFailure::Timeout,
                 e => PingFailure::Other { error: Box::new(e) },
             }
         )
@@ -271,7 +273,7 @@ impl ProtocolsHandler for PingHandler {
         }
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ProtocolsHandlerEvent<PingProtocol, (), PingResult, Self::Error>> {
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionHandlerEvent<PingProtocol, (), PingResult, Self::Error>> {
         // respond to inbound pings.
         if let Some(fut) = self.inbound.as_mut() {
             match fut.poll_unpin(cx) {
@@ -282,7 +284,7 @@ impl ProtocolsHandler for PingHandler {
                 }
                 Poll::Ready(Ok(stream)) => {
                     self.inbound = Some(recv_ping(stream).boxed());
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Ok(PingSuccess::Pong)))
+                    return Poll::Ready(ConnectionHandlerEvent::Custom(Ok(PingSuccess::Pong)))
                 }
             }
         }
@@ -297,10 +299,10 @@ impl ProtocolsHandler for PingHandler {
                 if self.failures > 1 || self.config.max_failures.get() > 1 {
                     if self.failures >= self.config.max_failures.get() {
                         log::debug!("Too many failures ({}). Closing connection.", self.failures);
-                        return Poll::Ready(ProtocolsHandlerEvent::Close(error))
+                        return Poll::Ready(ConnectionHandlerEvent::Close(error))
                     }
 
-                    return Poll::Ready(ProtocolsHandlerEvent::Custom(Err(error)))
+                    return Poll::Ready(ConnectionHandlerEvent::Custom(Err(error)))
                 }
             }
 
@@ -320,7 +322,7 @@ impl ProtocolsHandler for PingHandler {
                         self.timer.reset(self.config.interval);
                         self.outbound = Some(PingState::Idle(stream));
                         return Poll::Ready(
-                            ProtocolsHandlerEvent::Custom(
+                            ConnectionHandlerEvent::Custom(
                                 Ok(PingSuccess::Ping { rtt })
                             )
                         )
@@ -342,7 +344,7 @@ impl ProtocolsHandler for PingHandler {
                     },
                     Poll::Ready(Err(e)) => {
                         return Poll::Ready(
-                            ProtocolsHandlerEvent::Close(
+                            ConnectionHandlerEvent::Close(
                                 PingFailure::Other { error: Box::new(e) } 
                             )
                         )
@@ -356,7 +358,7 @@ impl ProtocolsHandler for PingHandler {
                     self.outbound = Some(PingState::OpenStream);
                     let protocol = SubstreamProtocol::new(PingProtocol, ())
                         .with_timeout(self.config.timeout);
-                    return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
+                    return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                         protocol
                     })
                 }

@@ -11,8 +11,5 @@ The minimal but necessary exmaples to get started with rust-libp2p.
 
 Install [protoc](https://grpc.io/docs/protoc-installation/).
 
-Build,
-
-```shell
-cargo build --release
-```
+Run the demos,
+- [demo](./echo/README.md)

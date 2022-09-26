@@ -2,4 +2,5 @@
 members = [
 	"ping-demo",
 	"echo",
+	"mdns",
 ]

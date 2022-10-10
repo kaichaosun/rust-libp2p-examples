@@ -1,0 +1,18 @@
+[package]
+name = "mdns-passphrase"
+version = "0.1.0"
+authors = ["Kaichao Sun <kaichaosuna@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libp2p = "0.48.0"
+futures = "0.3.1"
+void = "1"
+log = "0.4"
+env_logger = "0.9.0"
+async-std = { version = "1.6.2", features = ["attributes"] }
+smallvec = "1.6.1"
+futures-timer = "3.0.2"
+async-trait = "0.1"

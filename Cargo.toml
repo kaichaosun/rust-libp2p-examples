@@ -3,4 +3,5 @@ members = [
 	"ping-demo",
 	"echo",
 	"mdns",
+	"mdns-passphrase",
 ]

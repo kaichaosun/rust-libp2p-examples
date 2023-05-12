@@ -1,10 +1,10 @@
-# [rust-libp2p](https://github.com/libp2p/rust-libp2p) examples
+# Rust libp2p examples
 
 The minimal but necessary exmaples to get started with rust-libp2p.
 
 ## Examples
 
-* [A simple exmpale by echoing a string](./echo)
+* [echo](./echo)
 
 
 ## Run
@@ -12,4 +12,4 @@ The minimal but necessary exmaples to get started with rust-libp2p.
 Install [protoc](https://grpc.io/docs/protoc-installation/).
 
 Run the demos,
-- [demo](./echo/README.md)
+- [echo](./echo/README.md)

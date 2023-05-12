@@ -1,6 +1,6 @@
 # Echo a string
 
-This example implements the echo demo listed in [go-libp2p-examples](https://github.com/libp2p/go-libp2p-examples/tree/master/echo).
+This example implements the echo demo listed in [go-libp2p](https://github.com/libp2p/go-libp2p/tree/master/examples/echo).
 
 ## Run
 
@@ -48,4 +48,3 @@ And the logs in secod terminal looks like,
 ```
 
 Change the log level with `RUST_LOG=debug` to get more information during the execution.
-

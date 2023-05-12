@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let id_keys = identity::Keypair::generate_ed25519();
     let peer_id = PeerId::from(id_keys.public());
-    
+
     log::info!("Local peer id: {:?}", peer_id);
 
     let transport = libp2p::development_transport(id_keys).await?;
@@ -120,7 +120,5 @@ impl RequestResponseCodec for PassphraseVerifyCodec {
         Ok(PassphraseVeifyResponse(String::from_utf8(vec).unwrap()))
     }
 
-    async fn write_request<T>(
-        
-    )
+    // async fn write_request<T>()
 }

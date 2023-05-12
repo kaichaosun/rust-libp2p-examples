@@ -1,7 +1,7 @@
 [workspace]
 members = [
-	"ping-demo",
+	# "ping-demo",
 	"echo",
-	"mdns",
-	"mdns-passphrase",
+	# "mdns",
+	# "mdns-passphrase",
 ]
